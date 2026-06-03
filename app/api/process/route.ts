@@ -1,76 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import sharp from 'sharp'
-import { seededRandom, hashSeed } from '@/lib/prng'
 import type { Config } from '@/lib/config'
-
-function gaussianNoise(rand: () => number): number {
-  // Box-Muller transform
-  const u1 = Math.max(1e-10, rand())
-  const u2 = rand()
-  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2)
-}
-
-async function applyHighFreqNoise(
-  data: Buffer,
-  width: number,
-  height: number,
-  channels: number,
-  intensity: number
-): Promise<Buffer> {
-  const arr = new Uint8Array(data)
-  const amplitude = (intensity / 100) * 12
-  const seeds = [42, 137, 251]
-
-  for (let c = 0; c < Math.min(channels, 3); c++) {
-    const rand = seededRandom(seeds[c])
-    for (let i = c; i < arr.length; i += channels) {
-      const noise = gaussianNoise(rand) * amplitude
-      arr[i] = Math.max(0, Math.min(255, Math.round(arr[i] + noise)))
-    }
-  }
-  return Buffer.from(arr)
-}
-
-async function applyChromaticJitter(
-  data: Buffer,
-  channels: number,
-  intensity: number
-): Promise<Buffer> {
-  const arr = new Uint8Array(data)
-  const amp = Math.round((intensity / 100) * 8)
-  const offsets = [
-    Math.round((Math.random() - 0.5) * 2 * amp),
-    Math.round((Math.random() - 0.5) * 2 * amp),
-    Math.round((Math.random() - 0.5) * 2 * amp),
-  ]
-
-  for (let i = 0; i < arr.length; i += channels) {
-    for (let c = 0; c < Math.min(channels, 3); c++) {
-      arr[i + c] = Math.max(0, Math.min(255, arr[i + c] + offsets[c]))
-    }
-  }
-  return Buffer.from(arr)
-}
-
-async function applyPrivacySignature(
-  data: Buffer,
-  channels: number,
-  seed: string,
-  bits: number
-): Promise<Buffer> {
-  const arr = new Uint8Array(data)
-  const numericSeed = hashSeed(seed || 'imageguard-default')
-  const rand = seededRandom(numericSeed)
-  const mask = (1 << bits) - 1
-
-  for (let i = 0; i < arr.length; i += channels) {
-    for (let c = 0; c < Math.min(channels, 3); c++) {
-      const sigBit = Math.round(rand()) & mask
-      arr[i + c] = (arr[i + c] & ~mask) | sigBit
-    }
-  }
-  return Buffer.from(arr)
-}
+import {
+  applyHighFreqNoise,
+  applyChromaticJitter,
+  applyPrivacySignature,
+  applyFGSMStyle,
+  applyYCbCrShift,
+  generateAdversarialPatch,
+  applySpectralFilter,
+} from '@/lib/imageProcessing'
 
 export async function POST(req: NextRequest) {
   try {
@@ -83,163 +22,144 @@ export async function POST(req: NextRequest) {
     }
 
     const config: Config = configStr ? JSON.parse(configStr) : {}
-    const techniques = config.techniques || {}
+    const t = config.techniques || {}
 
     const arrayBuffer = await file.arrayBuffer()
     const inputBuffer = Buffer.from(arrayBuffer)
 
     let pipeline = sharp(inputBuffer)
 
-    // 1. Strip metadata
     if (config.stripMetadata !== false) {
       pipeline = pipeline.withMetadata({})
     }
 
-    // Get metadata for sizing
     const meta = await sharp(inputBuffer).metadata()
     const width = meta.width || 800
     const height = meta.height || 600
 
-    // 2. High frequency noise — needs raw pixel access
+    // Determine if we need raw pixel access
+    const needsRaw =
+      t.highFreqNoise?.enabled ||
+      t.chromaticJitter?.enabled ||
+      t.privacySignature?.enabled ||
+      t.fgsmStyle?.enabled ||
+      t.ycbcrShift?.enabled ||
+      t.spectralFilter?.enabled
+
     let rawBuf: Buffer | null = null
     let rawInfo: { width: number; height: number; channels: number } | null = null
 
-    const needsRaw =
-      (techniques.highFreqNoise?.enabled) ||
-      (techniques.chromaticJitter?.enabled) ||
-      (techniques.privacySignature?.enabled)
-
     if (needsRaw) {
-      const { data, info } = await pipeline
-        .raw()
-        .toBuffer({ resolveWithObject: true })
+      const { data, info } = await pipeline.raw().toBuffer({ resolveWithObject: true })
       rawBuf = data
       rawInfo = info
 
-      if (techniques.highFreqNoise?.enabled) {
-        rawBuf = await applyHighFreqNoise(
-          rawBuf,
-          info.width,
-          info.height,
-          info.channels,
-          techniques.highFreqNoise.intensity ?? 30
-        )
-      }
+      if (t.highFreqNoise?.enabled)
+        rawBuf = applyHighFreqNoise(rawBuf, info.width, info.height, info.channels, t.highFreqNoise.intensity ?? 30)
 
-      // 4. Chromatic jitter
-      if (techniques.chromaticJitter?.enabled) {
-        rawBuf = await applyChromaticJitter(
-          rawBuf,
-          info.channels,
-          techniques.chromaticJitter.intensity ?? 25
-        )
-      }
+      if (t.chromaticJitter?.enabled)
+        rawBuf = applyChromaticJitter(rawBuf, info.channels, t.chromaticJitter.intensity ?? 25)
 
-      // 6. Privacy signature
-      if (techniques.privacySignature?.enabled) {
-        rawBuf = await applyPrivacySignature(
-          rawBuf,
-          info.channels,
-          techniques.privacySignature.seed || '',
-          Math.min(3, Math.max(1, techniques.privacySignature.bits ?? 1))
-        )
-      }
+      if (t.fgsmStyle?.enabled)
+        rawBuf = applyFGSMStyle(rawBuf, info.width, info.height, info.channels, t.fgsmStyle.epsilon ?? 40)
+
+      if (t.ycbcrShift?.enabled)
+        rawBuf = applyYCbCrShift(rawBuf, info.channels, t.ycbcrShift.intensity ?? 40)
+
+      if (t.spectralFilter?.enabled)
+        rawBuf = applySpectralFilter(rawBuf, info.width, info.height, info.channels, t.spectralFilter.intensity ?? 50, t.spectralFilter.band ?? 'mid')
+
+      if (t.privacySignature?.enabled)
+        rawBuf = applyPrivacySignature(rawBuf, info.channels, t.privacySignature.seed || '', Math.min(3, Math.max(1, t.privacySignature.bits ?? 1)))
 
       pipeline = sharp(rawBuf, {
-        raw: {
-          width: info.width,
-          height: info.height,
-          channels: info.channels as 1 | 2 | 3 | 4,
-        },
+        raw: { width: info.width, height: info.height, channels: info.channels as 1 | 2 | 3 | 4 },
       })
     }
 
-    // 5. Dual resampling
-    if (techniques.dualResampling?.enabled) {
-      const factor = techniques.dualResampling.factor ?? 0.97
-      const clampedFactor = Math.max(0.93, Math.min(0.99, factor))
-      const smallW = Math.round(width * clampedFactor)
-      const smallH = Math.round(height * clampedFactor)
-
+    // Dual resampling
+    if (t.dualResampling?.enabled) {
+      const factor = Math.max(0.93, Math.min(0.99, t.dualResampling.factor ?? 0.97))
       pipeline = pipeline
-        .resize(smallW, smallH, { kernel: sharp.kernel.lanczos3 })
+        .resize(Math.round(width * factor), Math.round(height * factor), { kernel: sharp.kernel.lanczos3 })
         .resize(width, height, { kernel: sharp.kernel.nearest })
     }
 
-    // 3. Geometric warp (micro-rotation)
-    if (techniques.geometricWarp?.enabled) {
-      const maxAngle = 1.5
-      const angle = ((techniques.geometricWarp.intensity ?? 20) / 100) * maxAngle
+    // Geometric warp
+    if (t.geometricWarp?.enabled) {
+      const angle = ((t.geometricWarp.intensity ?? 20) / 100) * 1.5
       const sign = Math.random() > 0.5 ? 1 : -1
-      const rotAngle = sign * (0.1 + angle)
-
       pipeline = pipeline
-        .rotate(rotAngle, { background: { r: 0, g: 0, b: 0, alpha: 1 } })
+        .rotate(sign * (0.1 + angle), { background: { r: 0, g: 0, b: 0, alpha: 1 } })
         .resize(width, height, { fit: 'cover', position: 'centre' })
     }
 
-    // 7. Re-encode final
-    const outputFormat = config.outputFormat || 'jpeg'
+    // Attention anchor patch (composite)
+    if (t.attentionAnchor?.enabled) {
+      const patchSizePx = Math.round(32 + (t.attentionAnchor.size ?? 50) / 100 * 96)
+      const patchRaw = generateAdversarialPatch(patchSizePx, 'imageguard-anchor', 0.3)
+      const patchBuf = await sharp(patchRaw, { raw: { width: patchSizePx, height: patchSizePx, channels: 3 } })
+        .png()
+        .toBuffer()
 
+      const pos = t.attentionAnchor.position ?? 'random'
+      const positions = ['top-left', 'top-right', 'bottom-left', 'bottom-right'] as const
+      const resolvedPos = pos === 'random' ? positions[Math.floor(Math.random() * 4)] : pos
+      const gravity = resolvedPos.replace('-', '') as 'topleft' | 'topright' | 'bottomleft' | 'bottomright'
+
+      const opacity = Math.max(3, Math.min(12, t.attentionAnchor.opacity ?? 6)) / 100
+
+      pipeline = pipeline.composite([{
+        input: patchBuf,
+        gravity,
+        blend: 'over',
+        // @ts-ignore — sharp accepts opacity in composite
+        opacity,
+      }])
+    }
+
+    // Final re-encode
+    const outputFormat = config.outputFormat || 'jpeg'
     if (outputFormat === 'jpeg') {
-      const quality = techniques.reencoding?.enabled
-        ? Math.max(85, Math.min(99, techniques.reencoding.quality ?? 92))
-        : 92
+      const quality = t.reencoding?.enabled ? Math.max(85, Math.min(99, t.reencoding.quality ?? 92)) : 92
       pipeline = pipeline.jpeg({ quality, chromaSubsampling: '4:4:4' })
     } else if (outputFormat === 'png') {
       pipeline = pipeline.png({ compressionLevel: 6 })
-    } else if (outputFormat === 'webp') {
-      const quality = techniques.reencoding?.enabled
-        ? Math.max(85, Math.min(99, techniques.reencoding.quality ?? 92))
-        : 92
+    } else {
+      const quality = t.reencoding?.enabled ? Math.max(85, Math.min(99, t.reencoding.quality ?? 92)) : 92
       pipeline = pipeline.webp({ quality })
     }
 
     const outputBuffer = await pipeline.toBuffer()
 
-    // Compute raw pixels for metrics
+    // Metrics
     const origRaw = rawBuf && rawInfo
       ? { data: rawBuf, info: rawInfo }
       : await sharp(inputBuffer).raw().toBuffer({ resolveWithObject: true })
-
     const procRaw = await sharp(outputBuffer).raw().toBuffer({ resolveWithObject: true })
 
-    // Simple SSIM approximation
     const totalPixels = origRaw.info.width * origRaw.info.height
     const sampleCount = Math.min(1000, totalPixels)
     const stride = Math.floor(totalPixels / sampleCount)
     const ch = origRaw.info.channels
+    let ssimSum = 0, diffSum = 0
 
-    let ssimSum = 0
-    let diffSum = 0
     for (let i = 0; i < sampleCount; i++) {
       const pi = i * stride * ch
       if (pi + 2 >= origRaw.data.length || pi + 2 >= procRaw.data.length) break
-      const diff = (
-        Math.abs(origRaw.data[pi] - procRaw.data[pi]) +
-        Math.abs(origRaw.data[pi + 1] - procRaw.data[pi + 1]) +
-        Math.abs(origRaw.data[pi + 2] - procRaw.data[pi + 2])
-      ) / 3
+      const diff = (Math.abs(origRaw.data[pi] - procRaw.data[pi]) + Math.abs(origRaw.data[pi + 1] - procRaw.data[pi + 1]) + Math.abs(origRaw.data[pi + 2] - procRaw.data[pi + 2])) / 3
       ssimSum += 1 - diff / 255
       diffSum += diff
     }
+
     const ssim = Math.min(100, Math.round((ssimSum / sampleCount) * 100))
-    const avgDiff = diffSum / sampleCount
-    const protection = Math.min(100, Math.max(0, Math.round(avgDiff / 255 * 100 * 8 + 35)))
-
-    const mimeTypes: Record<string, string> = {
-      jpeg: 'image/jpeg',
-      png: 'image/png',
-      webp: 'image/webp',
-    }
-
-    const ext = outputFormat
+    const protection = Math.min(100, Math.max(0, Math.round(diffSum / sampleCount / 255 * 100 * 8 + 35)))
     const originalName = file.name.replace(/\.[^.]+$/, '')
 
     return new NextResponse(new Uint8Array(outputBuffer), {
       headers: {
-        'Content-Type': mimeTypes[outputFormat] || 'image/jpeg',
-        'Content-Disposition': `attachment; filename="${originalName}-protected.${ext}"`,
+        'Content-Type': outputFormat === 'jpeg' ? 'image/jpeg' : outputFormat === 'png' ? 'image/png' : 'image/webp',
+        'Content-Disposition': `attachment; filename="${originalName}-protected.${outputFormat}"`,
         'X-SSIM': String(ssim),
         'X-Protection': String(protection),
         'X-Original-Size': String(inputBuffer.length),
@@ -250,9 +170,6 @@ export async function POST(req: NextRequest) {
     })
   } catch (err) {
     console.error('Processing error:', err)
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Processing failed' },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: err instanceof Error ? err.message : 'Processing failed' }, { status: 500 })
   }
 }

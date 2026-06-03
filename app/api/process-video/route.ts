@@ -138,8 +138,8 @@ export async function POST(req: NextRequest) {
         cmd = cmd.outputOptions(['-vf', 'select=eq(pict_type\\,I)', '-vsync', 'vfr'])
       }
       cmd.output(path.join(framesDir, 'frame_%06d.jpg'))
-        .on('end', resolve)
-        .on('error', reject)
+        .on('end', () => resolve())
+        .on('error', (err: Error) => reject(err))
         .run()
     })
 
@@ -168,8 +168,8 @@ export async function POST(req: NextRequest) {
         .inputOptions([`-framerate ${fps}`])
         .outputOptions([`-c:v ${codec}`, `-b:v ${bitrate}`, '-pix_fmt yuv420p'])
         .output(outputSilent)
-        .on('end', resolve)
-        .on('error', reject)
+        .on('end', () => resolve())
+        .on('error', (err: Error) => reject(err))
         .run()
     })
 
@@ -182,7 +182,7 @@ export async function POST(req: NextRequest) {
           .input(inputPath)
           .outputOptions(['-c copy', '-map 0:v:0', '-map 1:a?', '-shortest'])
           .output(outputFinal)
-          .on('end', resolve)
+          .on('end', () => resolve())
           .on('error', () => {
             // If no audio stream, just copy the silent output
             fs.copyFile(outputSilent, outputFinal).then(resolve).catch(reject)

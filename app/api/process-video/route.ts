@@ -70,11 +70,16 @@ async function processFrame(framePath: string, config: Config): Promise<void> {
     const patchSizePx = Math.round(32 + (t.attentionAnchor.size ?? 50) / 100 * 96)
     const patchRaw = generateAdversarialPatch(patchSizePx, 'imageguard-anchor', 0.3)
     const patchBuf = await sharp(patchRaw, { raw: { width: patchSizePx, height: patchSizePx, channels: 3 } }).png().toBuffer()
-    const positions = ['topleft', 'topright', 'bottomleft', 'bottomright'] as const
-    const pos = t.attentionAnchor.position === 'random'
+    const gravityMap: Record<string, string> = {
+      'top-left': 'northwest', 'top-right': 'northeast',
+      'bottom-left': 'southwest', 'bottom-right': 'southeast',
+    }
+    const positions = ['top-left', 'top-right', 'bottom-left', 'bottom-right'] as const
+    const resolvedPos = t.attentionAnchor.position === 'random'
       ? positions[Math.floor(Math.random() * 4)]
-      : (t.attentionAnchor.position?.replace('-', '') as typeof positions[number])
-    pipeline = pipeline.composite([{ input: patchBuf, gravity: pos, blend: 'over' }])
+      : (t.attentionAnchor.position ?? 'top-left')
+    const gravity = gravityMap[resolvedPos] ?? 'northwest'
+    pipeline = pipeline.composite([{ input: patchBuf, gravity, blend: 'over' }])
   }
 
   pipeline = pipeline.jpeg({ quality: 95, chromaSubsampling: '4:4:4' })

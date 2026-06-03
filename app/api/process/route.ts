@@ -105,7 +105,11 @@ export async function POST(req: NextRequest) {
       const pos = t.attentionAnchor.position ?? 'random'
       const positions = ['top-left', 'top-right', 'bottom-left', 'bottom-right'] as const
       const resolvedPos = pos === 'random' ? positions[Math.floor(Math.random() * 4)] : pos
-      const gravity = resolvedPos.replace('-', '') as 'topleft' | 'topright' | 'bottomleft' | 'bottomright'
+      const gravityMap: Record<string, string> = {
+        'top-left': 'northwest', 'top-right': 'northeast',
+        'bottom-left': 'southwest', 'bottom-right': 'southeast',
+      }
+      const gravity = gravityMap[resolvedPos] ?? 'northwest'
 
       const opacity = Math.max(3, Math.min(12, t.attentionAnchor.opacity ?? 6)) / 100
 

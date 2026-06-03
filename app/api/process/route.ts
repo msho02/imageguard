@@ -236,7 +236,7 @@ export async function POST(req: NextRequest) {
     const ext = outputFormat
     const originalName = file.name.replace(/\.[^.]+$/, '')
 
-    return new NextResponse(outputBuffer, {
+    return new NextResponse(new Uint8Array(outputBuffer), {
       headers: {
         'Content-Type': mimeTypes[outputFormat] || 'image/jpeg',
         'Content-Disposition': `attachment; filename="${originalName}-protected.${ext}"`,

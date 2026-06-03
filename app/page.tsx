@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useEffect, useCallback, useRef, useState } from 'react'
-import { Shield, Download, Play, Trash2, Moon, Sun, Github } from 'lucide-react'
+import { Shield, Download, Play, Trash2, Moon, Sun } from 'lucide-react'
 import JSZip from 'jszip'
 import { toast } from 'sonner'
 
